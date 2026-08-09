@@ -29,5 +29,6 @@ htmlcov/
 # Claude Code project-local state
 .claude/
 
-# othes
+# others
 plan.md
+specifications.md
