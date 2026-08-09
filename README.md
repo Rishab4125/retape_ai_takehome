@@ -109,7 +109,7 @@ run.py               # CLI adapter: argv -> load_case -> evaluate_offer -> JSON 
 ### Assumptions
 
 - **Prioritize early program-fee collection:** The payment schedule should collect the program fee as early as possible. For balloon and tiered-payment schedules, keep early creditor payments as low as the rules allow so that the maximum possible available balance can be used to cover the program fee at the earliest dates.
-- 
+
 - **Even payments take priority:** If both `even_pays` and `is_ballooning_allowed` are `true`, use even payments and ignore ballooning.
 
 - **Token payments come first:** Because payments cannot decrease, payments equal to `min_payment_cents` can only appear at the beginning. At most the first `max_token_pays` payments can be token. Later payments must be greater than the minimum.
@@ -135,35 +135,48 @@ in the dataclass, loader, and all four case fixtures.
 
 `domain/simulation.py::simulate` is the single function used everywhere a
 balance must be checked — for scoring a candidate schedule, and for testing
-whether an additional-funding amount makes the offer feasible. It groups
-transactions by date, applies all credits before all debits on each date,
+whether an additional-funding amount makes the offer feasible. 
+
+It groups transactions by date, applies all credits before all debits on each date,
 and flags infeasibility as soon as the balance goes negative on *any* date
 (not just the final balance).
 
-### Candidate generation & the objective
+### Candidate Generation & Objective
 
-For a fixed shape (`even` / `balloon` / `staircase`, chosen once from
-`even_pays` / `is_ballooning_allowed` — not searched), the optimizer builds
-one candidate schedule per payment count `k = 1..effective_max_k`, allocates
-the program fee, simulates the full ledger, discards infeasible candidates,
-and picks the best remaining one via a deterministic **lexicographic**
-comparison:
+For each possible payment count `k = 1..effective_max_k`, generate one schedule using the selected payment shape:
 
-1. **Largest cumulative fee collected, earliest date first** (the stated
-   objective: front-load the program fee).
-2. **Smallest creditor payment, earliest position first** (defers larger
-   payments to later dates — the natural consequence of priority 1, made
-   explicit as a tiebreaker).
-3. **Smallest `k`** (deterministic final tiebreak).
+- `even` → when `even_pays = true`
+- `balloon` → when `is_ballooning_allowed = true` and `even_pays = false`
+- `staircase` → otherwise
 
-**Fee allocation** (`optimizer.allocate_fee_earliest`) is a single forward
-greedy sweep: at each eligible cadence date (starting at the first creditor
-payment date — fee cannot be collected earlier), take as much of the
-remaining fee as the date's own balance allows, then move on. This is
-provably optimal for priority 1: every future SDA dollar is fungible and
-unspent balance simply carries forward at no cost, so collecting fee earlier
-never makes a later date worse than deferring the same dollar would —
-deferring only ties or hurts. No backtracking is needed.
+The shape is determined by the creditor rules and is **not searched as a separate option**.
+
+For each `k`:
+
+1. Generate the creditor payment schedule while respecting all payment rules.
+2. Allocate the program fee as early as possible.
+3. Simulate the complete ledger.
+4. Discard the candidate if it is not feasible.
+
+Among all feasible candidates, choose the best one using this order:
+
+1. **Collect the maximum possible program fee as early as possible.**
+2. If tied, **keep earlier creditor payments as small as possible**, pushing larger payments toward the end.
+3. If still tied, choose the **smallest `k`**.
+
+### Program Fee Allocation
+
+Program fees are allocated using a forward greedy approach. Starting from the first creditor payment date:
+
+1. Calculate how much balance is available after that date's required transactions.
+2. Collect as much of the remaining program fee as possible.
+3. Move to the next eligible cadence date with any remaining fee.
+
+The goal is always to collect the program fee at the **earliest possible date**.
+
+For balloon and tiered schedules in particular, the payment generator should keep early creditor payments as low as the rules allow, leaving the maximum possible cash available to collect the program fee early.
+
+No backtracking is required for fee allocation because delaying a fee payment cannot improve the outcome: available cash carries forward, so collecting an available fee earlier is always at least as good as collecting it later.
 
 ### Payment shape interpretation
 
@@ -223,51 +236,6 @@ then a concrete trace through each of the four example cases in `cases/`.
    to ask "does *any* schedule become feasible?" — never recursing into
    funding math. Apply guardrails, return
    `Result(feasible=False, schedule=None, additional_funds=...)`.
-
-**`case1_feasible_even` — the "everything fits" path:**
-`even_pays=true` locks the shape immediately (step 3 short-circuits — no
-balloon/staircase construction ever runs). Steps 4–5 still search
-`k = 1..6`, because *which* `k` is best is not fixed by the flag — `k=6`
-wins here because splitting the $500 offer total six ways yields the
-smallest early payments, which is what the objective rewards. Fee
-allocation front-loads the full $300 fee across the first 3 of 6 dates.
-Result: `feasible: true`, no `additional_funds` branch is ever entered.
-
-**`case2_infeasible_minima` — the "nothing works, compute funding" path:**
-Every `k` from 1–4 is tried and every one fails simulation (this account is
-$100 short of the $500 total obligation by the horizon, regardless of how
-payments are arranged) — step 4 discards all of them, so step 6 fires. Both
-`find_min_lump_sum` and `find_min_monthly_increment` binary-search by
-repeatedly calling back into steps 1–5 with a modified client ledger (a
-synthetic extra credit, or bumped drafts) until the smallest amount that
-flips a `k` into "feasible" is found. Neither guardrail rejects the result.
-Result: `feasible: false`, `schedule: null`, both funding numbers populated
-independently (they are not derived from each other).
-
-**`case3_balloon` — shape construction meeting a pre-committed debit:**
-`is_ballooning_allowed=true` selects `build_balloon` in step 3: for each
-`k`, the first `k-1` payments sit at their floor and the last absorbs the
-rest (step 4), then that candidate is simulated. The simulation
-(`domain/simulation.py`) doesn't treat this case any differently from
-case 1 — it just also folds in the **pre-committed `-$150` debit** already
-sitting in the client's ledger on `2026-02-01`, because `simulate()` always
-includes every future ledger entry regardless of shape or scenario. That
-debit is *why* the balance dips to exactly `$0` on `2026-02-28` in the
-output — a side effect of step 4's simulation, not anything shape-specific.
-Result: `feasible: true`, `pay_shape_used: "balloon"`.
-
-**`case4_tiers` — floors/tiers interacting with the staircase search:**
-Neither flag is set, so step 3 selects `build_staircase`. For each `k`,
-`build_staircase` (step 4) tries the smallest trailing "elevated suffix"
-length `L = 1, 2, 3, ...` until one keeps the distinct-payment count within
-`max_segments` — here the tier `[[7, 5000]]` already forces a step at
-position 7, so `L` ends up being exactly the trailing tier group (positions
-7–12), which absorbs the leftover cash evenly. This is the one scenario
-where step 4's *shape construction* itself has to search (unlike even/
-balloon, which have a single deterministic sequence per `k`) before the
-fee-allocation and simulation sub-steps even run. Result: `feasible: true`,
-`pay_shape_used: "staircase"`, with payments 7+ all at or above the $50
-tier floor.
 
 ### Alternatives considered
 
