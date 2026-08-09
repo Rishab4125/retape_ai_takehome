@@ -1,4 +1,4 @@
-"""Pure date/cadence helpers. No I/O."""
+"""Date/cadence helpers."""
 
 from __future__ import annotations
 
