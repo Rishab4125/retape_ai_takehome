@@ -16,22 +16,37 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Layout
+## Layout (Updated)
+
+> Updated to the original layout to the actual submitted structure — see "Implementation
+> notes"
 
 ```
-hiring_takehome/
+retape_ai_takehome/
 ├── ASSIGNMENT.md            # full specification — read this
+├── specifications.md        # an internal, non-authoritative implementation spec
 ├── feasibility/
-│   ├── models.py            # data models, JSON loaders, date/EOM helpers (provided)
-│   └── engine.py            # >>> implement evaluate_offer here <<< (+ Result shape)
-├── cases/                   # four example cases (client.json / offer.json / creditor_rules.json)
+│   ├── domain/               # pure logic, zero I/O
+│   │   ├── models.py          # Client, Offer, CreditorRules, LedgerEntry
+│   │   ├── money.py            # round_half_up, pct_of_cents (Decimal-based)
+│   │   ├── dates.py             # cadence generation, EOM/mid-month clamping
+│   │   ├── simulation.py         # the one canonical ledger simulator
+│   │   ├── schedules.py           # floors/tiers/token rule + even/balloon/staircase builders
+│   │   ├── optimizer.py            # candidate generation, fee allocation, lexicographic selection
+│   │   └── funds.py                 # lump-sum / monthly-increment binary search + guardrails
+│   ├── adapters/
+│   │   └── json_loader.py    # the one I/O boundary — case JSON -> domain objects (+ validation)
+│   ├── engine.py             # >>> evaluate_offer <<< — orchestrates domain, owns Result shape
+│   └── models.py             # re-export shim (`from feasibility.models import ...` still works)
+├── cases/                   # example cases (client.json / offer.json / creditor_rules.json)
 │   ├── case1_feasible_even
 │   ├── case2_infeasible_minima
 │   ├── case3_balloon
 │   └── case4_tiers
-├── tests/
-│   ├── test_smoke.py        # scaffolding sanity tests (pass out of the box)
-│   └── test_cases.py        # example expectations — make these pass, then add your own
+├── tests/                   # test_smoke.py / test_cases.py (provided) plus test_money.py,
+│                              test_dates.py, test_simulation.py, test_schedules.py,
+│                              test_optimizer.py, test_funds.py, test_edge_cases.py,
+│                              test_cli.py, test_input_validation.py (added)
 ├── run.py                   # python run.py cases/<case>
 └── requirements.txt
 ```
@@ -62,19 +77,21 @@ doubt, write down your assumption and keep going.
 
 ---
 
-## Implementation notes (this submission)
+## Solution Implementation notes (the submission)
 
 ### Architecture
 
-The code is organized as a **hexagonal** layout: 
-  - **domain core** with zero I/O
-  - **thin adapter layer** for the one real I/O boundary (JSON file loading)
+The code is organized as a **hexagonal architecture** layout: 
+  - **domain core** main logic with. Dataclass and 'Date Helpers' logic from 
+  original 'feasibility/models.py' are transfered here
+  - **adapter layer** for the one real I/O boundary (JSON file loading). 
+  'Loaders' section definations from 'feasibility/models.py' are transfered here.
   -**`engine.py`** as the application/use-case layer that wires domain and adapter
   layer together.
 
 ```
 feasibility/
-  domain/            # pure logic only — no json, no pathlib, no I/O
+  domain/            # logic layer
     models.py         # Client, Offer, CreditorRules, LedgerEntry
     money.py          # round_half_up, pct_of_cents (Decimal-based)
     dates.py          # cadence generation, EOM/mid-month clamping
@@ -89,17 +106,14 @@ feasibility/
 run.py               # CLI adapter: argv -> load_case -> evaluate_offer -> JSON on stdout
 ```
 
-No `Protocol`/port interfaces were introduced. The only "port" in this
-system — JSON case loading — has exactly one implementation and nothing in
-the assignment requires swapping it, so a formal interface would be pure
-ceremony. Ordinary Python duck-typing already makes `adapters/json_loader.py`
-swappable in tests if that's ever needed.
+### Bugs Fixed
 
-Two bugs in the original scaffold were fixed as part of this: `round()`
-(banker's rounding) was replaced everywhere with an explicit `round_half_up`
-using `Decimal`, and `Offer.current_balance_cents` was renamed to
-`creditor_balance_cents` (matching ASSIGNMENT.md §3's own note and its own
-example `offer.json`) in the dataclass, loader, and all four case fixtures.
+Two bugs in the original scaffold were fixed as part of this: 
+- `round()` (banker's rounding) was replaced everywhere with an explicit `round_half_up`
+using `Decimal`
+- `Offer.current_balance_cents` was renamed to `creditor_balance_cents` 
+(matching ASSIGNMENT.md §3's own note and its own example `offer.json`) 
+in the dataclass, loader, and all four case fixtures.
 
 ### Ledger simulation
 
@@ -161,7 +175,7 @@ deferring only ties or hurts. No backtracking is needed.
   5000); the staircase construction respects these as-is in the untouched
   prefix and only overrides the elevated suffix.
 
-### Assumptions (documented, since this is the intentionally open-ended part)
+### Assumptions
 
 - `even_pays` takes priority over `is_ballooning_allowed` if a creditor
   somehow sets both, per ASSIGNMENT.md's "ballooning is irrelevant" note for
@@ -187,6 +201,84 @@ deferring only ties or hurts. No backtracking is needed.
 - If no finite lump sum / increment (within a generous search bound) makes
   the offer feasible, the same explicit-`false`-with-reason representation
   is used rather than silently returning a large placeholder amount.
+
+### Execution flow by scenario
+
+`evaluate_offer(client, offer, rules)` always runs the same pipeline; what
+changes per scenario is which branch/shape it lands in. General flow first,
+then a concrete trace through each of the four example cases in `cases/`.
+
+**General flow (every call):**
+
+1. Compute `offer_total = round_half_up(settlement_pct × creditor_balance_cents)`
+   and `program_fee = round_half_up(program_fee_pct × original_balance_cents)`
+   (`domain/money.py`).
+2. Generate the cadence — monthly dates from `first_payment_date` (or its
+   default) up to and including the horizon (`domain/dates.py`).
+3. Pick the shape once from the flags: `even_pays` → `"even"`,
+   else `is_ballooning_allowed` → `"balloon"`, else `"staircase"`
+   (`optimizer._build_shape`).
+4. For every `k = 1..effective_max_k`: build that shape's payment sequence
+   for `k` (`domain/schedules.py`), allocate the program fee as early as
+   possible against it (`optimizer.allocate_fee_earliest`), then run the
+   full ledger simulation (`domain/simulation.py::simulate`). A `k` that
+   fails at any step (invalid sequence, fee can't be fully collected,
+   balance goes negative) is simply dropped — not an error.
+5. If at least one candidate survives step 4, pick the best one via the
+   lexicographic comparator (`optimizer.select_best`) → build the
+   `ScheduleRow`s → return `Result(feasible=True, ...)`.
+6. If **no** candidate survives for **any** `k`, the offer is infeasible:
+   run the lump-sum and monthly-increment binary searches
+   (`domain/funds.py`), each repeatedly re-running steps 1–4 against an
+   augmented ledger (one extra credit, or every future draft bumped) purely
+   to ask "does *any* schedule become feasible?" — never recursing into
+   funding math. Apply guardrails, return
+   `Result(feasible=False, schedule=None, additional_funds=...)`.
+
+**`case1_feasible_even` — the "everything fits" path:**
+`even_pays=true` locks the shape immediately (step 3 short-circuits — no
+balloon/staircase construction ever runs). Steps 4–5 still search
+`k = 1..6`, because *which* `k` is best is not fixed by the flag — `k=6`
+wins here because splitting the $500 offer total six ways yields the
+smallest early payments, which is what the objective rewards. Fee
+allocation front-loads the full $300 fee across the first 3 of 6 dates.
+Result: `feasible: true`, no `additional_funds` branch is ever entered.
+
+**`case2_infeasible_minima` — the "nothing works, compute funding" path:**
+Every `k` from 1–4 is tried and every one fails simulation (this account is
+$100 short of the $500 total obligation by the horizon, regardless of how
+payments are arranged) — step 4 discards all of them, so step 6 fires. Both
+`find_min_lump_sum` and `find_min_monthly_increment` binary-search by
+repeatedly calling back into steps 1–5 with a modified client ledger (a
+synthetic extra credit, or bumped drafts) until the smallest amount that
+flips a `k` into "feasible" is found. Neither guardrail rejects the result.
+Result: `feasible: false`, `schedule: null`, both funding numbers populated
+independently (they are not derived from each other).
+
+**`case3_balloon` — shape construction meeting a pre-committed debit:**
+`is_ballooning_allowed=true` selects `build_balloon` in step 3: for each
+`k`, the first `k-1` payments sit at their floor and the last absorbs the
+rest (step 4), then that candidate is simulated. The simulation
+(`domain/simulation.py`) doesn't treat this case any differently from
+case 1 — it just also folds in the **pre-committed `-$150` debit** already
+sitting in the client's ledger on `2026-02-01`, because `simulate()` always
+includes every future ledger entry regardless of shape or scenario. That
+debit is *why* the balance dips to exactly `$0` on `2026-02-28` in the
+output — a side effect of step 4's simulation, not anything shape-specific.
+Result: `feasible: true`, `pay_shape_used: "balloon"`.
+
+**`case4_tiers` — floors/tiers interacting with the staircase search:**
+Neither flag is set, so step 3 selects `build_staircase`. For each `k`,
+`build_staircase` (step 4) tries the smallest trailing "elevated suffix"
+length `L = 1, 2, 3, ...` until one keeps the distinct-payment count within
+`max_segments` — here the tier `[[7, 5000]]` already forces a step at
+position 7, so `L` ends up being exactly the trailing tier group (positions
+7–12), which absorbs the leftover cash evenly. This is the one scenario
+where step 4's *shape construction* itself has to search (unlike even/
+balloon, which have a single deterministic sequence per `k`) before the
+fee-allocation and simulation sub-steps even run. Result: `feasible: true`,
+`pay_shape_used: "staircase"`, with payments 7+ all at or above the $50
+tier floor.
 
 ### Alternatives considered
 
