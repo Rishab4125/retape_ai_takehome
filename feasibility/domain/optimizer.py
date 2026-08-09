@@ -77,15 +77,6 @@ def allocate_fee_earliest(
     """Greedily collect as much program fee as possible on the earliest
     eligible date, then the next, etc., until the total is collected or the
     horizon is exhausted.
-
-    Correctness: every future dollar in the SDA is fungible, and money left
-    unspent simply carries forward at no cost. So collecting fee at the
-    earliest date up to the most that date's own running balance allows
-    (after that date's required creditor payment + bank fee) can never make
-    a later date worse than deferring the same fee dollar would — deferring
-    only ties or hurts a later date's balance. A single forward greedy sweep
-    (no backtracking) is therefore optimal for "lexicographically maximize
-    cumulative fee collected, earliest date first".
     """
     if program_fee_total == 0:
         return {}, []
