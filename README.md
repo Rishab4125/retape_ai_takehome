@@ -106,6 +106,20 @@ feasibility/
 run.py               # CLI adapter: argv -> load_case -> evaluate_offer -> JSON on stdout
 ```
 
+### Assumptions
+
+- **Even payments take priority:** If both `even_pays` and `is_ballooning_allowed` are `true`, use even payments and ignore ballooning.
+
+- **Token payments come first:** Because payments cannot decrease, payments equal to `min_payment_cents` can only appear at the beginning. At most the first `max_token_pays` payments can be token payments. Later payments must be greater than the minimum.
+
+- **Zero offer total:** If `offer_total` is `0` and there is no program fee, return a valid result with no creditor payments and an empty schedule. If a program fee is still due, collect it starting from the first available cadence date.
+
+- **Lump-sum dates:** Only consider future draft dates and payment cadence dates as possible lump-sum dates. There is no need to check every calendar date.
+
+- **No future drafts:** If there are no future drafts (`N = 0`), a monthly increment cannot help. Return `amount_cents: 0` and `within_guardrail: false` with a clear reason.
+
+- **No possible funding solution:** If no reasonable lump sum or monthly increment can make the offer feasible, return `within_guardrail: false` with a clear reason instead of returning an arbitrary large amount.
+
 ### Bugs Fixed
 
 Two bugs in the original scaffold were fixed as part of this: 
@@ -174,33 +188,6 @@ deferring only ties or hurts. No backtracking is needed.
   groups (e.g. `[[7, 5000]]` → positions 1–6 at the base minimum, 7+ at
   5000); the staircase construction respects these as-is in the untouched
   prefix and only overrides the elevated suffix.
-
-### Assumptions
-
-- `even_pays` takes priority over `is_ballooning_allowed` if a creditor
-  somehow sets both, per ASSIGNMENT.md's "ballooning is irrelevant" note for
-  even payers.
-- Token-pay eligibility is treated as positional: because payments are
-  non-decreasing and tier floors only step up with position, the
-  base-minimum-eligible slots are necessarily the earliest ones — positions
-  `1..max_token_pays` may sit at `min_payment_cents`; later positions must
-  strictly exceed it (still subject to any stricter tier floor).
-- `offer_total == 0`: treated as a pass-through with zero creditor payments
-  (`k = 0`, empty schedule) if `program_fee` is also zero; if a fee is still
-  owed with no creditor payment due, the fee alone is allocated across
-  cadence dates starting at the first one.
-- **Lump-sum placement dates** are restricted to a deterministic, tractable
-  set — every future draft date and every cadence date — rather than every
-  calendar date. Placing a lump sum on a date with no intervening
-  balance-affecting event is never strictly better than placing it on the
-  earlier of the two, so this loses no generality in practice.
-- **Monthly increment with zero future drafts** (`N = 0`, e.g. `as_of_date`
-  already at or past `last_draft_date`): reported as
-  `within_guardrail: false` with an explicit reason, `amount_cents: 0`,
-  rather than a fabricated large number, since no increment can help.
-- If no finite lump sum / increment (within a generous search bound) makes
-  the offer feasible, the same explicit-`false`-with-reason representation
-  is used rather than silently returning a large placeholder amount.
 
 ### Execution flow by scenario
 
