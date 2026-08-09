@@ -2,9 +2,9 @@
 independent, using binary search over the monotonic feasibility relation,
 plus guardrail evaluation.
 
-Functions here return plain tuples (never the engine's ``FundsOption``
+Functions here return plain tuples (and not the engine's ``FundsOption``
 dataclass) to avoid a circular import between ``engine.py`` (which owns the
-output dataclasses) and this module (which is pure domain logic).
+output dataclasses) and this module (which is domain logic).
 """
 
 from __future__ import annotations
