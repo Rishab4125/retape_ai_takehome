@@ -28,3 +28,6 @@ htmlcov/
 
 # Claude Code project-local state
 .claude/
+
+# othes
+plan.md
