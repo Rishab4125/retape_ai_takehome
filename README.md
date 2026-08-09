@@ -108,9 +108,11 @@ run.py               # CLI adapter: argv -> load_case -> evaluate_offer -> JSON 
 
 ### Assumptions
 
+- **Prioritize early program-fee collection:** The payment schedule should collect the program fee as early as possible. For balloon and tiered-payment schedules, keep early creditor payments as low as the rules allow so that the maximum possible available balance can be used to cover the program fee at the earliest dates.
+- 
 - **Even payments take priority:** If both `even_pays` and `is_ballooning_allowed` are `true`, use even payments and ignore ballooning.
 
-- **Token payments come first:** Because payments cannot decrease, payments equal to `min_payment_cents` can only appear at the beginning. At most the first `max_token_pays` payments can be token payments. Later payments must be greater than the minimum.
+- **Token payments come first:** Because payments cannot decrease, payments equal to `min_payment_cents` can only appear at the beginning. At most the first `max_token_pays` payments can be token. Later payments must be greater than the minimum.
 
 - **Zero offer total:** If `offer_total` is `0` and there is no program fee, return a valid result with no creditor payments and an empty schedule. If a program fee is still due, collect it starting from the first available cadence date.
 
