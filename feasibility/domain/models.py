@@ -1,7 +1,7 @@
 """Pure domain data models for the feasibility take-home.
 
-No I/O here (no ``json``, no ``pathlib``) — these are plain dataclasses.
-Money is always integer cents; dates are ``datetime.date``.
+Plain dataclasses.
+Money is always an integer number of cents; dates are ``datetime.date``.
 """
 
 from __future__ import annotations
