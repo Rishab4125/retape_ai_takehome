@@ -237,34 +237,29 @@ then a concrete trace through each of the four example cases in `cases/`.
    funding math. Apply guardrails, return
    `Result(feasible=False, schedule=None, additional_funds=...)`.
 
-### Alternatives considered
+### Alternatives Considered
 
-- **Brute-force cent-by-cent search** for schedules and funding minima —
-  rejected: unnecessary given the exact-sum/floor/tier structure admits a
-  much smaller, deterministic construction, and the assignment explicitly
-  warns against brute-forcing every cent value.
-- **Recursive additional-funds computation** (recomputing funding minima
-  inside the funding search itself) — rejected per the spec's explicit
-  warning; the funding search only asks "does *any* feasible schedule
-  exist?", never "what funding does *this* infeasible case need?".
-- **A formal `Protocol`-based loader port** — rejected; no second
-  implementation of case loading exists anywhere in this assignment, so an
-  interface would be abstraction with no consumer.
+- **Brute-force cent-by-cent search:** Rejected because the payment constraints
+  allow a much smaller deterministic construction.
+- **Recursive funding calculation:** Rejected because funding searches should
+  only check whether a feasible schedule exists for a given amount.
 
-### Known edge cases
+### Known Edge Cases
 
-Covered by `tests/test_edge_cases.py` and friends: `offer_total == 0`;
-`program_fee_pct == 0`; `bank_fee_cents == 0`; very large cent values (up to
-10¹¹–10¹², verifying `Decimal`-based money math has no float drift);
-first-payment date beyond the horizon (infeasible — no cadence date exists
-at all); first-payment date exactly on the horizon (still valid, `k=1`
-works); multiple ledger entries on the same date; a balance landing exactly
-at zero; `max_segments == 1` (forces a flat/even-looking staircase); an
-already-feasible offer (`additional_funds` is `null`); zero future drafts
-for the monthly-increment search. Not otherwise handled: truly pathological
-inputs like negative money fields are rejected at the JSON-loading boundary
-with a `ValueError` (light validation, not a full schema validator) rather
-than being simulated.
+Covered by the test suite:
+
+- `offer_total == 0`
+- Zero program or bank fee
+- Very large cent values
+- First payment after the horizon
+- First payment exactly on the horizon
+- Multiple ledger entries on the same date
+- Balance reaching exactly zero
+- `max_segments == 1`
+- Already-feasible offers (`additional_funds = null`)
+- No future drafts for monthly-increment funding
+
+Invalid inputs such as negative money values are rejected during JSON loading with a `ValueError`.
 
 ### Determinism & tie-breaking
 
