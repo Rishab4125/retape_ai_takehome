@@ -1,7 +1,7 @@
 """Backward-compatible re-export shim.
 
-The actual implementations now live in ``feasibility.domain.models``,
-``feasibility.domain.dates``, ``feasibility.domain.money`` (pure, no I/O)
+The actual implementations now present in ``feasibility.domain.models``,
+``feasibility.domain.dates``, ``feasibility.domain.money``
 and ``feasibility.adapters.json_loader`` (the JSON file adapter). This
 module exists purely so existing imports (``from feasibility.models import
 ...``) keep working unchanged.
