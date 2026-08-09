@@ -1,0 +1,225 @@
+# Settlement Feasibility & Fee Engine — Take-home
+
+Welcome, and thanks for taking the time. The full problem is in
+[`ASSIGNMENT.md`](./ASSIGNMENT.md). This README is just orientation.
+
+## The task in one line
+
+Given a client's escrow account, a settlement offer, and a creditor's rules,
+decide whether the offer is affordable (and schedule it, collecting our fee as
+early as allowed) or — if not — compute the minimum extra funding needed.
+
+## Setup
+
+```bash
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Layout
+
+```
+hiring_takehome/
+├── ASSIGNMENT.md            # full specification — read this
+├── feasibility/
+│   ├── models.py            # data models, JSON loaders, date/EOM helpers (provided)
+│   └── engine.py            # >>> implement evaluate_offer here <<< (+ Result shape)
+├── cases/                   # four example cases (client.json / offer.json / creditor_rules.json)
+│   ├── case1_feasible_even
+│   ├── case2_infeasible_minima
+│   ├── case3_balloon
+│   └── case4_tiers
+├── tests/
+│   ├── test_smoke.py        # scaffolding sanity tests (pass out of the box)
+│   └── test_cases.py        # example expectations — make these pass, then add your own
+├── run.py                   # python run.py cases/<case>
+└── requirements.txt
+```
+
+## Run
+
+```bash
+# evaluate a single case (prints the Result as JSON)
+python run.py cases/case1_feasible_even
+
+# tests
+pytest -q
+```
+
+Out of the box, `tests/test_smoke.py` passes and `tests/test_cases.py` fails —
+the latter is your target. Go beyond those four cases with your own tests.
+
+## What to submit
+
+Your implementation, your tests, and a short README section describing:
+- your approach and the alternatives you considered,
+- **your interpretation of the payment shapes** (even / staircase / balloon — we
+  left these loosely defined on purpose),
+- assumptions you made, and known edge cases / limitations.
+
+Budget ~5–6 hours. Prefer a correct, well-tested core over breadth. When in
+doubt, write down your assumption and keep going.
+
+---
+
+## Implementation notes (this submission)
+
+### Architecture
+
+The code is organized as a **hexagonal** layout: 
+  - **domain core** with zero I/O
+  - **thin adapter layer** for the one real I/O boundary (JSON file loading)
+  -**`engine.py`** as the application/use-case layer that wires domain and adapter
+  layer together.
+
+```
+feasibility/
+  domain/            # pure logic only — no json, no pathlib, no I/O
+    models.py         # Client, Offer, CreditorRules, LedgerEntry
+    money.py          # round_half_up, pct_of_cents (Decimal-based)
+    dates.py          # cadence generation, EOM/mid-month clamping
+    simulation.py     # the one canonical ledger simulator
+    schedules.py      # floors/tiers/token rule + even/balloon/staircase builders
+    optimizer.py      # candidate generation across k, fee allocation, lexicographic selection
+    funds.py          # lump-sum / monthly-increment binary search + guardrails
+  adapters/
+    json_loader.py    # the one I/O boundary — case JSON -> domain objects (+ light validation)
+  engine.py          # evaluate_offer(): orchestrates domain modules, owns the output Result shape
+  models.py          # re-export shim so `from feasibility.models import ...` keeps working
+run.py               # CLI adapter: argv -> load_case -> evaluate_offer -> JSON on stdout
+```
+
+No `Protocol`/port interfaces were introduced. The only "port" in this
+system — JSON case loading — has exactly one implementation and nothing in
+the assignment requires swapping it, so a formal interface would be pure
+ceremony. Ordinary Python duck-typing already makes `adapters/json_loader.py`
+swappable in tests if that's ever needed.
+
+Two bugs in the original scaffold were fixed as part of this: `round()`
+(banker's rounding) was replaced everywhere with an explicit `round_half_up`
+using `Decimal`, and `Offer.current_balance_cents` was renamed to
+`creditor_balance_cents` (matching ASSIGNMENT.md §3's own note and its own
+example `offer.json`) in the dataclass, loader, and all four case fixtures.
+
+### Ledger simulation
+
+`domain/simulation.py::simulate` is the single function used everywhere a
+balance must be checked — for scoring a candidate schedule, and for testing
+whether an additional-funding amount makes the offer feasible. It groups
+transactions by date, applies all credits before all debits on each date,
+and flags infeasibility as soon as the balance goes negative on *any* date
+(not just the final balance).
+
+### Candidate generation & the objective
+
+For a fixed shape (`even` / `balloon` / `staircase`, chosen once from
+`even_pays` / `is_ballooning_allowed` — not searched), the optimizer builds
+one candidate schedule per payment count `k = 1..effective_max_k`, allocates
+the program fee, simulates the full ledger, discards infeasible candidates,
+and picks the best remaining one via a deterministic **lexicographic**
+comparison:
+
+1. **Largest cumulative fee collected, earliest date first** (the stated
+   objective: front-load the program fee).
+2. **Smallest creditor payment, earliest position first** (defers larger
+   payments to later dates — the natural consequence of priority 1, made
+   explicit as a tiebreaker).
+3. **Smallest `k`** (deterministic final tiebreak).
+
+**Fee allocation** (`optimizer.allocate_fee_earliest`) is a single forward
+greedy sweep: at each eligible cadence date (starting at the first creditor
+payment date — fee cannot be collected earlier), take as much of the
+remaining fee as the date's own balance allows, then move on. This is
+provably optimal for priority 1: every future SDA dollar is fungible and
+unspent balance simply carries forward at no cost, so collecting fee earlier
+never makes a later date worse than deferring the same dollar would —
+deferring only ties or hurts. No backtracking is needed.
+
+### Payment shape interpretation
+
+- **Even** (`even_pays=true`): `offer_total // k`, with the remainder cents
+  placed on the *last* payments (Binding Constraint 7). `k` is still chosen
+  by the objective, not fixed.
+- **Balloon** (`is_ballooning_allowed=true`): the first `k-1` payments sit at
+  their position's floor (token/tier rules included); the final payment
+  absorbs whatever remains. Rejected (that `k` is skipped) if the final
+  payment would violate non-decreasing order or its own floor.
+- **Staircase** (neither flag set): built as *(a) the first `k - L`
+  positions at their own individual natural floor* — never forced onto a
+  shared level — plus *(b) a trailing suffix of length `L` elevated to one
+  uniform level that absorbs all remaining cash*. `L` is tried from `1` up to
+  `k`, and the **smallest** `L` that (i) sums exactly, (ii) stays
+  non-decreasing, and (iii) keeps the total distinct payment values within
+  `max_segments` is used. Minimizing `L` means as many early positions as
+  possible stay at their true floor, which is what "minimize early creditor
+  outflow" means concretely — and it naturally produces a balloon-like final
+  payment whenever `max_segments` allows it, without needing
+  `is_ballooning_allowed`.
+
+  Tier interaction: tiers already partition positions into natural floor
+  groups (e.g. `[[7, 5000]]` → positions 1–6 at the base minimum, 7+ at
+  5000); the staircase construction respects these as-is in the untouched
+  prefix and only overrides the elevated suffix.
+
+### Assumptions (documented, since this is the intentionally open-ended part)
+
+- `even_pays` takes priority over `is_ballooning_allowed` if a creditor
+  somehow sets both, per ASSIGNMENT.md's "ballooning is irrelevant" note for
+  even payers.
+- Token-pay eligibility is treated as positional: because payments are
+  non-decreasing and tier floors only step up with position, the
+  base-minimum-eligible slots are necessarily the earliest ones — positions
+  `1..max_token_pays` may sit at `min_payment_cents`; later positions must
+  strictly exceed it (still subject to any stricter tier floor).
+- `offer_total == 0`: treated as a pass-through with zero creditor payments
+  (`k = 0`, empty schedule) if `program_fee` is also zero; if a fee is still
+  owed with no creditor payment due, the fee alone is allocated across
+  cadence dates starting at the first one.
+- **Lump-sum placement dates** are restricted to a deterministic, tractable
+  set — every future draft date and every cadence date — rather than every
+  calendar date. Placing a lump sum on a date with no intervening
+  balance-affecting event is never strictly better than placing it on the
+  earlier of the two, so this loses no generality in practice.
+- **Monthly increment with zero future drafts** (`N = 0`, e.g. `as_of_date`
+  already at or past `last_draft_date`): reported as
+  `within_guardrail: false` with an explicit reason, `amount_cents: 0`,
+  rather than a fabricated large number, since no increment can help.
+- If no finite lump sum / increment (within a generous search bound) makes
+  the offer feasible, the same explicit-`false`-with-reason representation
+  is used rather than silently returning a large placeholder amount.
+
+### Alternatives considered
+
+- **Brute-force cent-by-cent search** for schedules and funding minima —
+  rejected: unnecessary given the exact-sum/floor/tier structure admits a
+  much smaller, deterministic construction, and the assignment explicitly
+  warns against brute-forcing every cent value.
+- **Recursive additional-funds computation** (recomputing funding minima
+  inside the funding search itself) — rejected per the spec's explicit
+  warning; the funding search only asks "does *any* feasible schedule
+  exist?", never "what funding does *this* infeasible case need?".
+- **A formal `Protocol`-based loader port** — rejected; no second
+  implementation of case loading exists anywhere in this assignment, so an
+  interface would be abstraction with no consumer.
+
+### Known edge cases
+
+Covered by `tests/test_edge_cases.py` and friends: `offer_total == 0`;
+`program_fee_pct == 0`; `bank_fee_cents == 0`; very large cent values (up to
+10¹¹–10¹², verifying `Decimal`-based money math has no float drift);
+first-payment date beyond the horizon (infeasible — no cadence date exists
+at all); first-payment date exactly on the horizon (still valid, `k=1`
+works); multiple ledger entries on the same date; a balance landing exactly
+at zero; `max_segments == 1` (forces a flat/even-looking staircase); an
+already-feasible offer (`additional_funds` is `null`); zero future drafts
+for the monthly-increment search. Not otherwise handled: truly pathological
+inputs like negative money fields are rejected at the JSON-loading boundary
+with a `ValueError` (light validation, not a full schema validator) rather
+than being simulated.
+
+### Determinism & tie-breaking
+
+Every search (candidate generation, fee allocation, lump-sum date ordering,
+binary searches) iterates in a fixed, documented order with no randomness
+and no reliance on set/dict iteration order for anything output-affecting,
+so identical inputs always produce byte-identical output.
